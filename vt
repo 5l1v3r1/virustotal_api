@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+
+"""Python module for making API requests to VirusTotal"""
+
+import os
+import sys
+import json
+import time
+import hashlib
+import argparse
+import itertools
+import threading
+import requests
+
+# Add your VirusTotal API key
+API_KEY = ''
+
+
+VERBOSE = None
+SCAN = None
+FILENAME = None
+
+
+BLOCKSIZE = 65536
+
+
+ANIMATION = False
+
+
+# Declaring the colors available for the program's console output when running
+DEBUG = '\033[95m'
+WARNING = '\033[93m'
+ERROR = '\033[91m'
+ENDC = '\033[0m'
+BOLD = '\033[1m'
+
+
+def error(message):
+    """Error message on the console output"""
+    return ERROR + "[ERROR] " + ENDC + message
+
+
+def warning(message):
+    """Warning message on the console output"""
+    return WARNING + "[WARNING] " + ENDC + message
+
+
+def debug(message):
+    """Debug message on the console output"""
+    return DEBUG + "[DEBUG] " + ENDC + message
+
+
+def bold(message):
+    """Bold message on the console output"""
+    return BOLD + "[PROGRAM] " + ENDC + message
+
+
+def loading_animation():
+    """Load animation while waiting for VirusTotal response"""
+
+    for character in itertools.cycle(['|', '/', '-', '\\']):
+        if ANIMATION:
+            break
+        print(BOLD + "[PROGRAM] " + ENDC + "Your resource is queued for analysis  " + character, end='\r', flush=True)
+        time.sleep(0.1)
+
+
+def argument_parser():
+    """"Parse argument provided to the script"""
+
+    parser = argparse.ArgumentParser(description='VirusTotal API')
+    parser.add_argument("filename", help="analyzed file")
+    parser.add_argument("-v", "--verbose", action="store_true", help="return the full scan")
+    parser.add_argument("-s", "--scan", action="store_true", help="send file to VirusTotal")
+    args = parser.parse_args()
+
+    global FILENAME
+    FILENAME = args.filename
+
+    if args.scan:
+        global SCAN
+        SCAN = True
+
+    if args.verbose:
+        global VERBOSE
+        VERBOSE = True
+
+
+def get_file_path(filename):
+    """Return the path of the file to analyze"""
+
+    if os.path.exists(filename):
+        return os.path.abspath(filename)
+    else:
+        print(error("Bad filepath"))
+        exit(-1)
+
+
+def generate_hash(path):
+    """Generate the hash of the file to analyze"""
+
+    hasher = hashlib.sha256()
+
+    with open(path, 'rb') as afile:
+        buf = afile.read(BLOCKSIZE)
+        while len(buf) > 0:
+            hasher.update(buf)
+            buf = afile.read(BLOCKSIZE)
+
+    return hasher.hexdigest()
+
+
+def send_hash_to_virustotal(hashfile):
+    """Send the calculated hash to VirusTotal"""
+
+    global ANIMATION
+
+    params = {'apikey':  API_KEY, 'resource': hashfile}
+    headers = {
+        "Accep-Encoding": "gzip, deflate",
+        "User-Agent": "gzip, Unknow"
+    }
+
+    if SCAN:
+        animate_thread = threading.Thread(target=loading_animation)
+        animate_thread.start()
+        time.sleep(10)
+
+    response = requests.get('https://virustotal.com/vtapi/v2/file/report', params=params, headers=headers)
+
+    try:
+        json_response = response.json()
+    except ValueError as response_error:
+        if str(response) == "<Response [204]>":
+            print(error("VirusTotal API request limit has been reached. Wait a few moments"))
+        else:
+            print(error(str(response_error)))
+        ANIMATION = True
+        exit(-1)
+
+    if json_response["response_code"] == 0:
+        print(bold("Hash not found in the VirusTotal database"))
+        ANIMATION = True
+        exit(-1)
+
+    # Waiting for VirusTotal to finish it's analysis
+    while json_response["verbose_msg"] == "Your resource is queued for analysis":
+        time.sleep(17)
+        response = requests.get('https://virustotal.com/vtapi/v2/file/report', params=params, headers=headers)
+
+        try:
+            json_response = response.json()
+        except ValueError as response_error:
+            if str(response) == "<Response [204]>":
+                print(error("VirusTotal API request limit has been reached. Wait a few moments"))
+            else:
+                print(error(str(response_error)))
+            ANIMATION = True
+            exit(-1)
+
+    if SCAN:
+        ANIMATION = True
+        print("")
+
+    return json_response
+
+
+def send_file_to_virustotal(path, filename):
+    """Send the file to VirusTotal for analysis"""
+
+    params = {'apikey':  API_KEY}
+    files = {'file': (filename, open(path, 'rb'))}
+
+    response = requests.post('https://www.virustotal.com/vtapi/v2/file/scan', files=files, params=params)
+    json_response = response.json()
+
+    if json_response["response_code"] == 0:
+        print(error("Sending file error, retry"))
+        print(error(json_response["response_code"]))
+        exit(-1)
+
+    print(bold(json_response["verbose_msg"]))
+
+    return json_response
+
+
+def parse_json_response(json_response):
+    """Parse the scan report back from VirusTotal"""
+
+    response = json.dumps(json_response, indent=2, sort_keys=True, separators=(',', ': '))
+    return response
+
+
+def virustotal_response(json_response):
+    """Display the result return by VirusTotal"""
+
+    if json_response == 0:
+        print(error("Empty response"))
+        exit(-1)
+
+    if VERBOSE:
+        response = parse_json_response(json_response)
+        print(bold(response))
+    elif json_response["response_code"] == -2:
+        print(bold(json_response["verbose_msg"]))
+    else:
+        print(bold("Number of positive detections : " + str(json_response["positives"])))
+
+
+def main():
+
+    argument_parser()
+
+    path = get_file_path(FILENAME)
+
+    if not API_KEY:
+        print(error("Add your VirusTotal API key"))
+        exit(-1)
+
+    if SCAN:
+        json_response = send_file_to_virustotal(path, FILENAME)
+
+    hashfile = generate_hash(path)
+    json_response = send_hash_to_virustotal(hashfile)
+
+    virustotal_response(json_response)
+
+
+if __name__ == "__main__":
+    main()
